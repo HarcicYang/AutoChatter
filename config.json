@@ -1,1 +1,9 @@
-
+{
+  "lagrange": {
+    "uin": 0,
+    "sign_url": ""
+  },
+  "chatting": {
+    "prompt": ""
+  }
+}
