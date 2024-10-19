@@ -1,87 +1,111 @@
+from cfgr.manager import Serializers
 import asyncio
-import os
+import threading
+import time
+
+from pywin.Demos.threadedgui import TestThread
 
 from lagrange import Lagrange, install_loguru
 from lagrange.client.client import Client
-from lagrange.client.events.group import GroupMessage, GroupSign, GroupReaction
+from lagrange.client.events.group import GroupMessage
 from lagrange.client.events.service import ServerKick
-from lagrange.client.message.elems import At, Text, Quote, Emoji
+from lagrange.client.message.elems import At, Text, Quote, Image
+
+from ct.utils.config import ChatterConfig
+
+if True:
+    chatter_cfg = ChatterConfig.load_from("config.json", Serializers.JSON, "otto-chatter")
+
+from ct.utils import ChatController, Sender
+from ct.events import MsgEvent
+from ct.actions import NoneArgs, MsgSendArgs
+from ct.api import ChatAPI
+
+ctl = ChatController()
+capi = ChatAPI()
+
+
+def inner_handler(client: Client, event: GroupMessage) -> None:
+    msg = ""
+    for i in event.msg_chain:
+        if type(i) in [Image, Text]:
+            msg += i.display
+
+    if not msg:
+        return
+    print(msg)
+    rst, msgs = asyncio.run(ctl.collect(msg, event.uin))
+    if not rst:
+        return
+
+    rsp = capi.gen(
+        MsgEvent(
+            time=int(time.time()),
+            msg=msgs,
+            gid=event.grp_id,
+            emotion=ctl.emotion,
+            reply_to=None if not isinstance(event.msg_chain[0], Quote) else event.msg_chain[0].msg,
+            sender=Sender(
+                nickname=event.nickname,
+                uin=event.uin
+            )
+        )
+    )
+
+    print(rsp)
+
+    if isinstance(rsp.args, NoneArgs):
+        return
+    elif isinstance(rsp.args, MsgSendArgs):
+        if rsp.args.emotion_change:
+            ctl.update_emotion(float(rsp.args.emotion_change))
+
+        for i in rsp.args.msgs:
+            if isinstance(i, float) or isinstance(i, int):
+                time.sleep(i * 3)
+            elif isinstance(i, str):
+                if rsp.args.msgs.index(i) == 0:
+                    if rsp.args.at:
+                        def task():
+                            asyncio.run(client.send_grp_msg([At.build(event), Text(i)], event.grp_id))
+                    elif rsp.args.reply:
+                        def task():
+                            asyncio.run(client.send_grp_msg([Quote.build(event), Text(i)], event.grp_id))
+                    else:
+                        def task():
+                            asyncio.run(client.send_grp_msg([Text(i)], event.grp_id))
+                else:
+                    def task():
+                        asyncio.run(client.send_grp_msg([Text(i)], event.grp_id))
+                threading.Thread(target=task).start()
+        logger.success("Reply succeed")
+
+
+tasks = []
 
 
 async def msg_handler(client: Client, event: GroupMessage):
-    # print(event)
-    if event.msg.startswith("114514"):
-        msg_seq = await client.send_grp_msg(
-            [At.build(event), Text("1919810")], event.grp_id
-        )
-        await asyncio.sleep(5)
-        await client.recall_grp_msg(event.grp_id, msg_seq)
-    elif event.msg.startswith("imgs"):
-        await client.send_grp_msg(
-            [
-                await client.upload_grp_image(
-                    open("98416427_p0.jpg", "rb"), event.grp_id
-                )
-            ],
-            event.grp_id,
-        )
-    print(f"{event.nickname}({event.grp_name}): {event.msg}")
+    logger.info(f"{event.nickname} ({event.grp_name}): {event.msg}")
+    if event.uin == client.uin or event.grp_id != 623371208:
+        return
+    threading.Thread(target=lambda: inner_handler(client, event)).start()
 
 
 async def handle_kick(client: "Client", event: "ServerKick"):
-    print(f"被服务器踢出：[{event.title}] {event.tips}")
+    logger.error(f"被服务器踢出：[{event.title}] {event.tips}")
     await client.stop()
 
 
-async def handle_grp_sign(client: "Client", event: "GroupSign"):
-    a = "闲着没事爱打卡，可以去找个班上"
-    k = None
-    uid = None
-    while True:
-        kk = await client.get_grp_members(event.grp_id, k)
-        for m in kk.body:
-            if m.account.uin == event.uin:
-                uid = m.account.uid
-                break
-        if uid:
-            break
-        if kk.next_key:
-            k = kk.next_key.decode()
-        else:
-            raise ValueError(f"cannot find member: {event.uin}")
-
-    await client.send_grp_msg(
-        [At(f"@{event.nickname} ", event.uin, uid), Text(a)], event.grp_id
+if __name__ == '__main__':
+    lag = Lagrange(
+        chatter_cfg.lagrange.uin,
+        "linux",
+        chatter_cfg.lagrange.sign_url
     )
+    install_loguru()
+    lag.log.set_level("INFO")
 
-
-async def handle_group_reaction(client: "Client", event: "GroupReaction"):
-    msg = (await client.get_grp_msg(event.grp_id, event.seq))[0]
-    mi = (await client.get_grp_member_info(event.grp_id, event.uid)).body[0]
-    if event.is_emoji:
-        e = Text(chr(event.emoji_id))
-    else:
-        e = Emoji(event.emoji_id)
-    if event.is_increase:
-        m = "给你点了"
-    else:
-        m = "取消了"
-    await client.send_grp_msg(
-        [Quote.build(msg), Text(f"{mi.name.string if mi.name else mi.nickname}{m}"), e],
-        event.grp_id,
-    )
-
-
-lag = Lagrange(
-    int(os.environ.get("LAGRANGE_UIN", "0")),
-    "linux",
-    os.environ.get("LAGRANGE_SIGN_URL", "")
-)
-install_loguru()  # optional, for better logging
-lag.log.set_level("INFO")
-
-lag.subscribe(GroupMessage, msg_handler)
-lag.subscribe(ServerKick, handle_kick)
-
-
-lag.launch()
+    lag.subscribe(GroupMessage, msg_handler)
+    lag.subscribe(ServerKick, handle_kick)
+    logger = lag.log.fork("lagrange")
+    lag.launch()

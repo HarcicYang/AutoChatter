@@ -8,6 +8,7 @@ class LagrangeConfig(BaseConfig):
 
 class ChattingConfig(BaseConfig):
     prompt: str
+    api_key: str
 
 
 class ChatterConfig(BaseConfig):
